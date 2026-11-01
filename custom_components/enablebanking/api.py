@@ -41,8 +41,8 @@ from .models import AccountBalance
 _LOGGER = logging.getLogger(__name__)
 
 _BALANCE_TYPE_PREFERENCE: tuple[str, ...] = (
-    "CLBD",  # closing booked
     "ITAV",  # interim available
+    "CLBD",  # closing booked
     "XPCD",  # expected
     "ITBD",  # interim booked
     "OPBD",  # opening booked
