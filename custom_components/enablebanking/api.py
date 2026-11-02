@@ -202,7 +202,11 @@ class EnableBankingClient:
             "%Y-%m-%dT%H:%M:%S.000000+00:00"
         )
         payload: dict[str, Any] = {
-            "access": {"valid_until": valid_until},
+            "access": {
+                "valid_until": valid_until,
+                "balances": True,
+                "transactions": True,
+            },
             "aspsp": {"name": aspsp_name, "country": aspsp_country},
             "psu_type": psu_type,
             "state": secrets.token_urlsafe(16),
@@ -262,6 +266,28 @@ class EnableBankingClient:
         if not isinstance(balances, list):
             return []
         return balances
+
+    async def async_get_account_transactions(
+        self, account_id: str, date_from: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch every page, optionally from a date, including empty pages."""
+        params = {"date_from": date_from} if date_from else {}
+        transactions: list[dict[str, Any]] = []
+        keys: set[str] = set()
+        while True:
+            data = await self._request(
+                "GET", f"/accounts/{account_id}/transactions", params=dict(params)
+            )
+            if not isinstance(data, dict) or not isinstance(data.get("transactions"), list):
+                raise EnableBankingAPIError("Unexpected transactions payload")
+            transactions.extend(t for t in data["transactions"] if isinstance(t, dict))
+            key = data.get("continuation_key")
+            if not key:
+                return transactions
+            if not isinstance(key, str) or key in keys:
+                raise EnableBankingAPIError("Invalid or repeated transactions continuation key")
+            keys.add(key)
+            params["continuation_key"] = key
 
     async def async_get_account_details(self, account_id: str) -> dict[str, Any]:
         """Return the account-details object for a single account.

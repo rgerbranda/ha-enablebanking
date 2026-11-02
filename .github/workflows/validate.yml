@@ -63,8 +63,16 @@ jobs:
       - name: mypy
         run: uv run mypy
 
-  # No pytest job: this repo ships no tests/ directory yet. Adding an empty pytest run
-  # would report green while proving nothing, so the job appears once real tests do.
+  transaction-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          enable-cache: false
+      - run: uv sync --extra dev
+      - name: Offline transaction regression tests
+        run: uv run python -m unittest discover -s tests -v
 
   release-gate:
     # Tag pushes only. Without this check a tag can advertise one version while the

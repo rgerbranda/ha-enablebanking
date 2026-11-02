@@ -226,3 +226,41 @@ You do not need to regenerate your application private key unless you revoked it
 ## License
 
 MIT
+
+### Last transaction sensor
+
+Each account also gets a **Last transaction** monetary sensor. Its state is the
+amount of the latest booked transaction (debits negative, credits positive).
+Attributes include `date`, `value_date`, `description`, `counterparty`,
+`counterparty_account`, `transaction_id`, `entry_reference`, and `transactions`
+(the latest ten booked transactions). An account with no booked transactions has
+an unknown transaction state. Transactions with the same booking date are ordered
+by their stable reference; banks do not always provide an intra-day timestamp.
+
+The first successful transaction fetch establishes a baseline without events.
+Later polls publish `enablebanking_new_transaction` for newly observed booked
+entries, with `entry_id`, `stable_id`, `iban`, and the transaction attributes.
+References and the last ten transactions survive restarts in the integration's
+existing cache. References are saved before events are emitted to prevent replay
+on restart. An interruption between saving and emitting can therefore lose an
+event; event delivery is not a durable queue.
+
+All available transaction pages are fetched initially. Subsequent polls start
+seven days before the last successful transaction fetch, allowing for delayed
+bookings. Older backdated entries outside that overlap may be missed. Failed
+fetches retain cached transactions and expose `last_error` on the sensor; balance
+updates continue. Polling follows the existing schedule and balance back-off.
+
+Enable Banking documents `entry_reference` as the cross-fetch identity;
+`transaction_id` can change. If a bank omits the reference, a content fingerprint
+is used. Identical entries without distinct references cannot reliably be
+separated. See the [Enable Banking FAQ](https://enablebanking.com/docs/faq/).
+
+Offline transaction regression tests (including a simulated restart):
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+These tests use small doubles at the Home Assistant boundary; they do not replace
+validation in a running Home Assistant installation.

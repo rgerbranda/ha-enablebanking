@@ -29,6 +29,7 @@ Design notes (v0.5.0):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -61,6 +62,7 @@ from .errors import (
 )
 from .jwt_helper import jwt_seconds_remaining, mint_jwt
 from .models import AccountBalance, EnableBankingData
+from .transactions import normalise_transactions
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -323,7 +325,65 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
         self.last_refresh = now
         back_off_until = now + _BACK_OFF
 
+        pending_events: list[dict[str, Any]] = []
         for stable_id, ab in fresh.items():
+            previous = self._cached.get(stable_id) or self._legacy_by_uid.get(ab.account_id)
+            if previous:
+                ab = replace(
+                    ab,
+                    transactions=list(previous.transactions),
+                    seen_transaction_ids=list(previous.seen_transaction_ids),
+                    transactions_initialized=previous.transactions_initialized,
+                    transactions_polled_at=previous.transactions_polled_at,
+                    transactions_error=previous.transactions_error,
+                )
+            if stable_id not in skip_ids and stable_id not in rate_limited_ids:
+                try:
+                    rows = await self.client.async_get_account_transactions(
+                        ab.account_id,
+                        (
+                            (ab.transactions_polled_at - timedelta(days=7)).date().isoformat()
+                            if ab.transactions_polled_at
+                            else None
+                        ),
+                    )
+                    transactions = normalise_transactions(rows)
+                    seen = set(ab.seen_transaction_ids)
+                    if ab.transactions_initialized:
+                        pending_events.extend(
+                            {
+                                "entry_id": self.config_entry.entry_id,
+                                "stable_id": stable_id,
+                                "iban": ab.iban,
+                                **transaction,
+                            }
+                            for transaction in reversed(transactions)
+                            if transaction["id"] not in seen
+                        )
+                    seen.update(transaction["id"] for transaction in transactions)
+                    ab.seen_transaction_ids = sorted(seen)
+                    history = {t["id"]: t for t in ab.transactions}
+                    history.update({t["id"]: t for t in transactions})
+                    ab.transactions = sorted(
+                        history.values(),
+                        key=lambda t: (t["date"] or "", t["id"]),
+                        reverse=True,
+                    )[:10]
+                    ab.transactions_initialized = True
+                    ab.transactions_polled_at = now
+                    ab.transactions_error = ""
+                except (
+                    EnableBankingAPIError,
+                    EnableBankingConnectionError,
+                    EnableBankingAuthenticationError,
+                    EnableBankingSessionError,
+                ) as err:
+                    ab.transactions_error = type(err).__name__
+                    _LOGGER.warning(
+                        "Transaction fetch failed; keeping cached transactions: %s",
+                        type(err).__name__,
+                    )
+
             if stable_id in rate_limited_ids:
                 ab.rate_limited_until = back_off_until
             else:
@@ -337,7 +397,10 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             for adopted in {ab.account_id for ab in fresh.values() if ab.account_id}:
                 self._legacy_by_uid.pop(adopted, None)
 
+        # Persist identities before publishing events: restarts must not replay them.
         await self._save_cache()
+        for event in pending_events:
+            self.hass.bus.async_fire(f"{DOMAIN}_new_transaction", event)
 
         consent_expires_at = self._parse_consent_expires()
         self._maybe_warn_expiry(consent_expires_at)
@@ -415,6 +478,13 @@ def _balance_from_stored(data: dict[str, Any]) -> AccountBalance | None:
             reference_date=data.get("reference_date")
             if isinstance(data.get("reference_date"), str)
             else None,
+            transactions=[t for t in data.get("transactions", []) if isinstance(t, dict)],
+            seen_transaction_ids=[
+                t for t in data.get("seen_transaction_ids", []) if isinstance(t, str)
+            ],
+            transactions_initialized=data.get("transactions_initialized") is True,
+            transactions_polled_at=_parse_iso(data.get("transactions_polled_at")),
+            transactions_error=str(data.get("transactions_error", "")),
             last_polled_at=_parse_iso(data.get("last_polled_at")),
             rate_limited_until=_parse_iso(data.get("rate_limited_until")),
         )
@@ -432,6 +502,13 @@ def _balance_to_stored(ab: AccountBalance) -> dict[str, Any]:
         "product": ab.product,
         "currency": ab.currency,
         "balance": ab.balance,
+        "transactions": ab.transactions,
+        "seen_transaction_ids": ab.seen_transaction_ids,
+        "transactions_initialized": ab.transactions_initialized,
+        "transactions_polled_at": (
+            ab.transactions_polled_at.isoformat() if ab.transactions_polled_at else None
+        ),
+        "transactions_error": ab.transactions_error,
         "balance_type": ab.balance_type,
         "reference_date": ab.reference_date,
         "last_polled_at": ab.last_polled_at.isoformat() if ab.last_polled_at else None,

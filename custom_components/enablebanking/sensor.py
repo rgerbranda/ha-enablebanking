@@ -94,6 +94,7 @@ async def async_setup_entry(
                 continue
             known.add(stable_id)
             new_entities.append(EnableBankingBalanceSensor(coordinator, BALANCE_SENSOR, stable_id))
+            new_entities.append(EnableBankingTransactionSensor(coordinator, stable_id))
         if new_entities:
             async_add_entities(new_entities)
 
@@ -282,3 +283,55 @@ def _is_stale(account: AccountBalance, update_interval: timedelta | None) -> boo
     # below is Any as far as mypy is concerned. bool() keeps strict mode happy
     # without an ignore comment.
     return bool((utcnow() - account.last_polled_at) > 2 * interval)
+
+
+class EnableBankingTransactionSensor(EnableBankingBalanceSensor):
+    """Last booked transaction, persisted alongside the balance."""
+
+    def __init__(self, coordinator: EnableBankingCoordinator, stable_id: str) -> None:
+        super().__init__(
+            coordinator,
+            EnableBankingSensorDescription(
+                key="last_transaction",
+                icon="mdi:bank-transfer",
+                device_class=SensorDeviceClass.MONETARY,
+                suggested_display_precision=2,
+            ),
+            stable_id,
+        )
+
+    @property
+    def name(self) -> str:
+        account = self._current_account
+        label = (account.iban or account.name) if account else self._stable_id
+        return f"{label} Last transaction"
+
+    @property
+    def native_value(self) -> StateType:
+        account = self._current_account
+        return account.transactions[0]["amount"] if account and account.transactions else None
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        account = self._current_account
+        if account and account.transactions:
+            return str(account.transactions[0].get("currency") or account.currency)
+        return account.currency if account else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        account = self._current_account
+        if account is None:
+            return {}
+        return {
+            **(account.transactions[0] if account.transactions else {}),
+            "iban": account.iban,
+            "account_name": account.name,
+            "transactions": account.transactions,
+            "last_polled_at": (
+                account.transactions_polled_at.isoformat()
+                if account.transactions_polled_at
+                else None
+            ),
+            "last_error": account.transactions_error,
+        }
