@@ -17,7 +17,7 @@ from .coordinator import EnableBankingConfigEntry, EnableBankingCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.EVENT]
 
 SERVICE_REFRESH = "refresh"
 

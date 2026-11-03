@@ -89,6 +89,14 @@
       "balance": {
         "name": "Saldo"
       }
+    },
+    "event": {
+      "transaction": {
+        "name": "Verrichtingen {account}",
+        "event_types": {
+          "transaction": "Verrichting"
+        }
+      }
     }
   }
 }

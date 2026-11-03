@@ -9,7 +9,7 @@ from homeassistant.helpers.entity import EntityDescription
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import CONF_ASPSP_COUNTRY, CONF_ASPSP_NAME, CONF_PSU_TYPE, DOMAIN
-from .coordinator import EnableBankingCoordinator
+from .coordinator import EnableBankingConfigEntry, EnableBankingCoordinator
 
 
 def account_unique_id(entry_id: str, stable_id: str, key: str) -> str:
@@ -43,21 +43,19 @@ class EnableBankingEntity(CoordinatorEntity[EnableBankingCoordinator]):
             coordinator.config_entry.entry_id, stable_id, description.key
         )
 
-        entry = coordinator.config_entry
-        aspsp_name = entry.data.get(CONF_ASPSP_NAME, "Enable Banking")
-        country = entry.data.get(CONF_ASPSP_COUNTRY, "")
-        psu_type = entry.data.get(CONF_PSU_TYPE, "")
-        model_parts = [p for p in (country, psu_type) if p]
+        self._attr_device_info = bank_device_info(coordinator.config_entry)
 
-        # Put the bank in `manufacturer` so the service-info card reads
-        # "<country · psu_type> / door <Bank>" > that's the info users
-        # actually care about on a balance card. The "data via Enable
-        # Banking" provenance stays visible through the attribution on
-        # each entity and the integration card title.
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, entry.entry_id)},
-            name=aspsp_name,
-            manufacturer=aspsp_name,
-            model=" · ".join(model_parts) if model_parts else "Account",
-            entry_type=DeviceEntryType.SERVICE,
-        )
+
+def bank_device_info(entry: EnableBankingConfigEntry) -> DeviceInfo:
+    """Use the same bank device for balance sensors and transaction events."""
+    aspsp_name = entry.data.get(CONF_ASPSP_NAME, "Enable Banking")
+    country = entry.data.get(CONF_ASPSP_COUNTRY, "")
+    psu_type = entry.data.get(CONF_PSU_TYPE, "")
+    model_parts = [p for p in (country, psu_type) if p]
+    return DeviceInfo(
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=aspsp_name,
+        manufacturer=aspsp_name,
+        model=" · ".join(model_parts) if model_parts else "Account",
+        entry_type=DeviceEntryType.SERVICE,
+    )

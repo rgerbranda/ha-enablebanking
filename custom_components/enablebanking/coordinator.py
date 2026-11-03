@@ -107,7 +107,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
         # Deterministic per-entry minute offset in [0, 59] so multiple
         # banks don't all poll at xx:00:00. Hash of entry_id stays stable
         # across HA restarts.
-        self._minute_offset: int = abs(hash(entry.entry_id)) % 60
+        self._minute_offset: int = abs(hash(entry.entry_id)) % 10
 
     @property
     def minute_offset(self) -> int:
@@ -331,7 +331,6 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
             if previous:
                 ab = replace(
                     ab,
-                    transactions=list(previous.transactions),
                     seen_transaction_ids=list(previous.seen_transaction_ids),
                     transactions_initialized=previous.transactions_initialized,
                     transactions_polled_at=previous.transactions_polled_at,
@@ -362,13 +361,6 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
                         )
                     seen.update(transaction["id"] for transaction in transactions)
                     ab.seen_transaction_ids = sorted(seen)
-                    history = {t["id"]: t for t in ab.transactions}
-                    history.update({t["id"]: t for t in transactions})
-                    ab.transactions = sorted(
-                        history.values(),
-                        key=lambda t: (t["date"] or "", t["id"]),
-                        reverse=True,
-                    )[:10]
                     ab.transactions_initialized = True
                     ab.transactions_polled_at = now
                     ab.transactions_error = ""
@@ -380,7 +372,7 @@ class EnableBankingCoordinator(DataUpdateCoordinator[EnableBankingData]):
                 ) as err:
                     ab.transactions_error = type(err).__name__
                     _LOGGER.warning(
-                        "Transaction fetch failed; keeping cached transactions: %s",
+                        "Transaction fetch failed; preserving event checkpoint: %s",
                         type(err).__name__,
                     )
 
@@ -478,7 +470,6 @@ def _balance_from_stored(data: dict[str, Any]) -> AccountBalance | None:
             reference_date=data.get("reference_date")
             if isinstance(data.get("reference_date"), str)
             else None,
-            transactions=[t for t in data.get("transactions", []) if isinstance(t, dict)],
             seen_transaction_ids=[
                 t for t in data.get("seen_transaction_ids", []) if isinstance(t, str)
             ],
@@ -502,7 +493,6 @@ def _balance_to_stored(ab: AccountBalance) -> dict[str, Any]:
         "product": ab.product,
         "currency": ab.currency,
         "balance": ab.balance,
-        "transactions": ab.transactions,
         "seen_transaction_ids": ab.seen_transaction_ids,
         "transactions_initialized": ab.transactions_initialized,
         "transactions_polled_at": (

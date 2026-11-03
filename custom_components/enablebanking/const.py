@@ -20,7 +20,7 @@ CONF_CONSENT_EXPIRES_AT: Final = "consent_expires_at"
 # Fixed scheduled polling at these local hours > four polls/day, aligned
 # with typical waking life, sitting exactly at the PSD2 4/day cap with
 # regular 4-hour gaps (plus one 12-hour overnight gap).
-POLL_HOURS: Final = (10, 14, 18, 22)
+POLL_HOURS: Final = (7, 12, 17, 22)
 
 # Legacy / unused constants kept to avoid breaking imports in older
 # user automations referencing scan_interval. Scheduled polling ignores

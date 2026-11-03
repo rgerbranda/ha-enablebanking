@@ -34,6 +34,36 @@ class Description:
     icon: str | None = None
 
 
+class FakeEventEntity:
+    async def async_added_to_hass(self):
+        self.restored = True
+
+    def async_on_remove(self, listener):
+        self.remove_listener = listener
+
+    def _trigger_event(self, event_type, attributes):
+        self.last_event = (event_type, attributes)
+
+    def async_write_ha_state(self):
+        self.writes = getattr(self, "writes", 0) + 1
+
+
+class FakeBus:
+    def __init__(self):
+        self.listeners = []
+        self.async_fire = Mock(side_effect=self._dispatch)
+
+    def async_listen(self, name, listener):
+        pair = (name, listener)
+        self.listeners.append(pair)
+        return lambda: self.listeners.remove(pair)
+
+    def _dispatch(self, name, data):
+        for event_name, listener in list(self.listeners):
+            if name == event_name:
+                listener(types.SimpleNamespace(data=data))
+
+
 class Entity:
     def __init__(self, coordinator):
         self.coordinator = coordinator
@@ -57,9 +87,16 @@ def load_modules():
         "eb_test",
     ):
         stub(name).__path__ = []
+    stub("homeassistant.components.event", EventEntity=FakeEventEntity)
     stub("homeassistant.components.persistent_notification")
     stub("homeassistant.config_entries", ConfigEntry=Generic)
-    stub("homeassistant.core", CALLBACK_TYPE=object, HomeAssistant=object, callback=lambda f: f)
+    stub(
+        "homeassistant.core",
+        CALLBACK_TYPE=object,
+        HomeAssistant=object,
+        Event=object,
+        callback=lambda f: f,
+    )
     stub("homeassistant.helpers.event", async_track_time_change=Mock())
     stub("homeassistant.helpers.storage", Store=Generic)
     stub(
@@ -77,7 +114,7 @@ def load_modules():
         SensorEntity=object,
         SensorEntityDescription=Description,
     )
-    stub("homeassistant.helpers.entity_registry")
+    registry_module = stub("homeassistant.helpers.entity_registry", async_get=Mock())
     stub("homeassistant.helpers.entity_platform", AddEntitiesCallback=object)
     stub("homeassistant.helpers.typing", StateType=object)
     stub(
@@ -99,12 +136,14 @@ def load_modules():
             "coordinator",
             "entity",
             "sensor",
+            "event",
         ):
             spec = importlib.util.spec_from_file_location(f"eb_test.{name}", ROOT / f"{name}.py")
             module = importlib.util.module_from_spec(spec)
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
             loaded[name] = module
+    loaded["registry"] = registry_module
     return loaded
 
 
@@ -135,7 +174,7 @@ def account():
 def coordinator(cached=None):
     c = object.__new__(M["coordinator"].EnableBankingCoordinator)
     c.config_entry = types.SimpleNamespace(entry_id="entry", data={})
-    c.hass = types.SimpleNamespace(bus=types.SimpleNamespace(async_fire=Mock()))
+    c.hass = types.SimpleNamespace(bus=FakeBus())
     c.client = types.SimpleNamespace(
         async_get_all_balances=AsyncMock(return_value=({"stable": account()}, set())),
         async_get_account_transactions=AsyncMock(return_value=[row()]),
@@ -147,6 +186,8 @@ def coordinator(cached=None):
     c._maybe_warn_expiry = Mock()
     c.last_error = ""
     c.last_refresh = None
+    c.data = None
+    c.update_interval = None
     return c
 
 
@@ -209,7 +250,7 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
         await restarted._async_update_data()
         restarted.hass.bus.async_fire.assert_called_once()
 
-    async def test_failure_retains_transactions_and_recovery_not_baseline(self):
+    async def test_failure_retains_checkpoint_and_recovery_not_baseline(self):
         c = coordinator()
         c.client.async_get_account_transactions.side_effect = M[
             "errors"
@@ -223,25 +264,98 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
             "errors"
         ].EnableBankingConnectionError()
         await c._async_update_data()
-        self.assertEqual(c._cached["stable"].transactions[0]["id"], "a")
+        self.assertEqual(c._cached["stable"].seen_transaction_ids, ["a"])
         self.assertEqual(c._cached["stable"].balance, 100)
 
-    async def test_ten_latest_empty_window_and_sensor(self):
+    async def test_every_new_transaction_is_an_event_without_history(self):
         c = coordinator()
+        await c._async_update_data()
+        entity = M["event"].EnableBankingTransactionEvent(c, "stable")
+        entity.hass = c.hass
+        await entity.async_added_to_hass()
         c.client.async_get_account_transactions.return_value = [
-            row(str(i), booking_date=f"2026-10-{i:02}") for i in range(1, 16)
+            row(str(i), booking_date=f"2026-11-{i:02}") for i in range(1, 16)
         ]
         await c._async_update_data()
-        self.assertEqual(len(c._cached["stable"].transactions), 10)
+        self.assertEqual(entity.writes, 15)
+        self.assertEqual(entity.last_event[0], "transaction")
+        self.assertEqual(entity.last_event[1]["id"], "15")
+        self.assertEqual(entity.last_event[1]["amount"], -12.34)
+        self.assertNotIn("transactions", entity.last_event[1])
+        self.assertFalse(hasattr(c._cached["stable"], "transactions"))
         c.client.async_get_account_transactions.return_value = []
-        c.data = await c._async_update_data()
-        self.assertEqual(c._cached["stable"].transactions[0]["id"], "15")
-        sensor = M["sensor"].EnableBankingTransactionSensor(c, "stable")
-        self.assertEqual(sensor.native_value, -12.34)
-        self.assertEqual(sensor.native_unit_of_measurement, "EUR")
-        self.assertEqual(sensor.entity_description.state_class, None)
-        self.assertEqual(len(sensor.extra_state_attributes["transactions"]), 10)
-        self.assertTrue(sensor.available)
+        await c._async_update_data()
+        self.assertEqual(entity.writes, 15)
+        stored = c._store.async_save.call_args.args[0]["accounts"]["stable"]
+        self.assertNotIn("transactions", stored)
+        sensor = M["sensor"].EnableBankingBalanceSensor(c, M["sensor"].BALANCE_SENSOR, "stable")
+        self.assertEqual(sensor.native_value, 100)
+        self.assertNotIn("transactions", sensor.extra_state_attributes)
+
+    async def test_entity_filters_entry_account_and_unsubscribes(self):
+        c = coordinator(account())
+        entity = M["event"].EnableBankingTransactionEvent(c, "stable")
+        entity.hass = c.hass
+        await entity.async_added_to_hass()
+        self.assertTrue(entity.restored)
+        for data in (
+            {"entry_id": "another", "stable_id": "stable"},
+            {"entry_id": "entry", "stable_id": "another"},
+        ):
+            c.hass.bus.async_fire("enablebanking_new_transaction", data)
+        self.assertFalse(hasattr(entity, "writes"))
+        c.hass.bus.async_fire(
+            "enablebanking_new_transaction",
+            {
+                "entry_id": "entry",
+                "stable_id": "stable",
+                "amount": -3,
+            },
+        )
+        self.assertEqual(entity.writes, 1)
+        entity.remove_listener()
+        self.assertEqual(c.hass.bus.listeners, [])
+
+    async def test_event_platform_discovers_later_accounts_and_retires_old_sensor(self):
+        c = coordinator(account())
+        registry = Mock()
+        registry.async_get_entity_id.return_value = "sensor.old_last_transaction"
+        M["registry"].async_get.return_value = registry
+        callbacks = []
+        c.async_add_listener = lambda listener: callbacks.append(listener) or Mock()
+        c.config_entry.runtime_data = c
+        c.config_entry.async_on_unload = Mock()
+        added = Mock()
+        await M["event"].async_setup_entry(c.hass, c.config_entry, added)
+        self.assertEqual(len(added.call_args.args[0]), 1)
+        old_unique = M["entity"].account_unique_id("entry", "stable", "last_transaction")
+        registry.async_get_entity_id.assert_called_once_with("sensor", "enablebanking", old_unique)
+        registry.async_remove.assert_called_once_with("sensor.old_last_transaction")
+        callbacks[0]()
+        added.assert_called_once()
+        second = account()
+        second.stable_id = "second"
+        c._cached["second"] = second
+        callbacks[0]()
+        self.assertEqual(added.call_count, 2)
+        self.assertEqual(len(added.call_args.args[0]), 1)
+
+    async def test_reauthorisation_keeps_event_identity_and_deduplication(self):
+        c = coordinator()
+        await c._async_update_data()
+        original = M["event"].EnableBankingTransactionEvent(c, "stable")
+        rotated_account = account()
+        rotated_account.account_id = "new-session-uid"
+        c.client.async_get_all_balances.return_value = ({"stable": rotated_account}, set())
+        c.client.async_get_account_transactions.return_value = [row(transaction_id="rotated")]
+        await c._async_update_data()
+        reloaded = M["event"].EnableBankingTransactionEvent(c, "stable")
+        self.assertEqual(original._attr_unique_id, reloaded._attr_unique_id)
+        self.assertEqual(original._attr_device_info, reloaded._attr_device_info)
+        c.hass.bus.async_fire.assert_not_called()
+        self.assertEqual(
+            c.client.async_get_account_transactions.call_args.args[0], "new-session-uid"
+        )
 
     async def test_backoff_skips_transaction_request(self):
         cached = account()
@@ -259,23 +373,31 @@ class TransactionTests(unittest.IsolatedAsyncioTestCase):
             await c._async_update_data()
         c.hass.bus.async_fire.assert_not_called()
 
-    async def test_restart_hydrates_sensor_without_a_poll(self):
+    async def test_restart_hydrates_checkpoint_without_replaying(self):
         c = coordinator()
         await c._async_update_data()
         stored = c._store.async_save.call_args.args[0]
+        # Upgrade from the previous sensor implementation drops its history.
+        stored["accounts"]["stable"]["transactions"] = [{"id": "a", "amount": -12.34}]
         restarted = coordinator()
         restarted._store.async_load = AsyncMock(return_value=stored)
         restarted.async_set_updated_data = lambda data: setattr(restarted, "data", data)
         await restarted.async_load_cache()
-        sensor = M["sensor"].EnableBankingTransactionSensor(restarted, "stable")
-        self.assertEqual(sensor.native_value, -12.34)
-        restarted.client.async_get_account_transactions.assert_not_awaited()
+        self.assertFalse(hasattr(restarted._cached["stable"], "transactions"))
+        entity = M["event"].EnableBankingTransactionEvent(restarted, "stable")
+        entity.hass = restarted.hass
+        await entity.async_added_to_hass()
+        await restarted._async_update_data()
+        self.assertFalse(hasattr(entity, "writes"))
+        self.assertNotIn(
+            "transactions", restarted._store.async_save.call_args.args[0]["accounts"]["stable"]
+        )
 
     async def test_legacy_cache(self):
         raw = {"account_id": "uid", "balance": 100}
         restored = M["coordinator"]._balance_from_stored(raw)
         self.assertFalse(restored.transactions_initialized)
-        self.assertEqual(restored.transactions, [])
+        self.assertEqual(restored.seen_transaction_ids, [])
 
 
 if __name__ == "__main__":

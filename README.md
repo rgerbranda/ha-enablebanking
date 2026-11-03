@@ -227,36 +227,74 @@ You do not need to regenerate your application private key unless you revoked it
 
 MIT
 
-### Last transaction sensor
+### Transaction events
 
-Each account also gets a **Last transaction** monetary sensor. Its state is the
-amount of the latest booked transaction (debits negative, credits positive).
-Attributes include `date`, `value_date`, `description`, `counterparty`,
-`counterparty_account`, `transaction_id`, `entry_reference`, and `transactions`
-(the latest ten booked transactions). An account with no booked transactions has
-an unknown transaction state. Transactions with the same booking date are ordered
-by their stable reference; banks do not always provide an intra-day timestamp.
+Each account has an **event entity** for booked transactions, alongside its balance
+sensor. The event type is `transaction`. Each event contains one transaction:
+`amount` (debits negative, credits positive), `currency`, `date`, `value_date`,
+`description`, `counterparty`, `counterparty_account`, `transaction_id`,
+`entry_reference`, `id`, `iban`, `stable_id`, and `entry_id`.
 
-The first successful transaction fetch establishes a baseline without events.
-Later polls publish `enablebanking_new_transaction` for newly observed booked
-entries, with `entry_id`, `stable_id`, `iban`, and the transaction attributes.
-References and the last ten transactions survive restarts in the integration's
-existing cache. References are saved before events are emitted to prevent replay
-on restart. An interruption between saving and emitting can therefore lose an
-event; event delivery is not a durable queue.
+The entity state is the timestamp at which Home Assistant observed the event;
+`date` is the bank's booking date. Home Assistant retains the latest event and
+its attributes. There is **no transaction sensor or rolling transaction-list
+attribute**, and no state write when a balance poll finds no new transactions.
+The event entity restores its latest event through Home Assistant's normal event
+restoration. Restoring it does not emit a new transaction.
+
+The previous `last_transaction` sensor is retired automatically on upgrade.
+Existing dashboard cards referring to that sensor or its `transactions` list
+must be replaced. Balance sensor identities and history are unchanged. This
+integration does not provide a transaction-history table through entity
+attributes.
+
+The first successful transaction fetch establishes a baseline without historical
+events. Subsequent polls publish each newly observed booked transaction, oldest
+first. Entries on the same booking date are ordered by stable reference because
+banks may not supply an intra-day timestamp. The existing
+`enablebanking_new_transaction` bus event remains available for automations, with
+the same payload as the event entity. For example:
+
+```yaml
+alias: Notify on bank transaction
+triggers:
+  - trigger: event
+    event_type: enablebanking_new_transaction
+    event_data:
+      iban: BE_YOUR_ACCOUNT
+conditions: []
+actions:
+  - action: persistent_notification.create
+    data:
+      title: Bank transaction
+      message: >-
+        {{ trigger.event.data.amount }} {{ trigger.event.data.currency }} —
+        {{ trigger.event.data.counterparty or 'Unknown counterparty' }}
+mode: queued
+max: 100
+```
+
+Only deduplication references, the initialisation flag, and polling metadata are
+kept in the integration cache alongside balances; full transaction payloads are
+not persisted there. Old cached transaction lists are ignored and disappear on
+the next cache save. References are saved **before** events are emitted, avoiding
+replays after restart. An interruption between saving and emitting can lose an
+event: delivery is not a durable queue. Removing the cache resets the baseline.
 
 All available transaction pages are fetched initially. Subsequent polls start
 seven days before the last successful transaction fetch, allowing for delayed
 bookings. Older backdated entries outside that overlap may be missed. Failed
-fetches retain cached transactions and expose `last_error` on the sensor; balance
-updates continue. Polling follows the existing schedule and balance back-off.
+fetches preserve the previous checkpoint; balance updates continue. Polling
+follows the existing schedule and balance back-off. No config-flow changes are
+needed.
 
 Enable Banking documents `entry_reference` as the cross-fetch identity;
 `transaction_id` can change. If a bank omits the reference, a content fingerprint
 is used. Identical entries without distinct references cannot reliably be
 separated. See the [Enable Banking FAQ](https://enablebanking.com/docs/faq/).
 
-Offline transaction regression tests (including a simulated restart):
+Offline transaction regression tests (including simulated restart, per-account
+routing, multiple events per poll, migration, and listener removal):
 
 ```sh
 python -m unittest discover -s tests -v

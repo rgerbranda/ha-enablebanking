@@ -89,6 +89,14 @@
       "balance": {
         "name": "Balance"
       }
+    },
+    "event": {
+      "transaction": {
+        "name": "Transactions {account}",
+        "event_types": {
+          "transaction": "Transaction"
+        }
+      }
     }
   }
 }
