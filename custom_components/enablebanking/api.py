@@ -112,7 +112,7 @@ class EnableBankingClient:
         json: dict[str, Any] | None = None,
     ) -> Any:
         url = f"{ENABLE_BANKING_API_URL}{path}"
-        _LOGGER.debug("Enable Banking request: %s %s", method, url)
+        _LOGGER.debug("Enable Banking request: %s %s", method, path.strip("/").split("/")[0])
         try:
             async with self._session.request(
                 method,
@@ -124,11 +124,9 @@ class EnableBankingClient:
             ) as response:
                 text = await response.text()
                 _LOGGER.debug(
-                    "Enable Banking response: HTTP %s for %s %s > body: %s",
+                    "Enable Banking response: HTTP %s for %s",
                     response.status,
                     method,
-                    url,
-                    text[:3000],
                 )
                 if response.status in (401, 403):
                     # An expired/revoked consent also surfaces as 401, but with
@@ -136,31 +134,26 @@ class EnableBankingClient:
                     # bad JWT. Classify it as such for accurate logs (both still
                     # trigger reauth in the coordinator).
                     if response.status == 401 and "EXPIRED_SESSION" in text:
-                        raise EnableBankingSessionError(f"Session expired (HTTP 401): {text[:200]}")
-                    _LOGGER.error(
-                        "Enable Banking JWT rejected (HTTP %s). JWT info: %s. Response: %s",
-                        response.status,
-                        self._jwt_debug_info(),
-                        text[:500],
-                    )
+                        raise EnableBankingSessionError("Session expired (HTTP 401)")
+                    _LOGGER.error("Enable Banking authentication rejected (HTTP %s)", response.status)
                     raise EnableBankingAuthenticationError(
-                        f"Enable Banking rejected the JWT (HTTP {response.status}): {text[:200]}"
+                        f"Enable Banking rejected authentication (HTTP {response.status})"
                     )
                 if response.status == 404:
-                    raise EnableBankingSessionError(f"Session not found or expired: {text}")
+                    raise EnableBankingSessionError("Session not found or expired (HTTP 404)")
                 if response.status == 429:
                     raise EnableBankingRateLimitError(
-                        f"PSD2 rate limit exceeded at ASPSP: {text[:200]}"
+                        "PSD2 rate limit exceeded at ASPSP (HTTP 429)"
                     )
                 if response.status >= 400:
                     raise EnableBankingAPIError(
-                        f"Enable Banking HTTP {response.status}: {text[:200]}"
+                        f"Enable Banking HTTP {response.status}"
                     )
                 try:
                     return await response.json(content_type=None)
                 except (aiohttp.ContentTypeError, ValueError) as err:
                     raise EnableBankingAPIError(
-                        f"Invalid JSON from Enable Banking: {text[:200]}"
+                        "Invalid JSON from Enable Banking"
                     ) from err
         except (aiohttp.ClientError, TimeoutError) as err:
             raise EnableBankingConnectionError(f"Cannot connect to Enable Banking: {err}") from err
@@ -342,28 +335,6 @@ class EnableBankingClient:
             session.get("status"),
         )
 
-        # Temporary diagnostics for banks that authorize a session but expose
-        # no accounts. Log only container shapes and field names, never values.
-        accounts = session.get("accounts")
-        accounts_data = session.get("accounts_data")
-        _LOGGER.warning(
-            "Enable Banking account debug: "
-            "accounts_type=%s, accounts_count=%s, "
-            "accounts_data_type=%s, accounts_data_count=%s, "
-            "accounts_data_item_keys=%s",
-            type(accounts).__name__,
-            len(accounts) if isinstance(accounts, (list, dict)) else None,
-            type(accounts_data).__name__,
-            len(accounts_data) if isinstance(accounts_data, (list, dict)) else None,
-            (
-                sorted(accounts_data[0].keys())
-                if isinstance(accounts_data, list)
-                and accounts_data
-                and isinstance(accounts_data[0], dict)
-                else []
-            ),
-        )
-
         uids, metadata = _collect_accounts(session)
         _LOGGER.debug(
             "Resolved %d account uid(s); metadata entries: %d",
@@ -395,7 +366,7 @@ class EnableBankingClient:
             stable_id = _account_stable_id(meta, uid)
             _LOGGER.debug(
                 "metadata for %s (stable %s): keys=%s",
-                uid[:8],
+                _short_token(uid),
                 _short_token(stable_id),
                 sorted(meta.keys()) if meta else "<missing>",
             )
@@ -404,7 +375,7 @@ class EnableBankingClient:
             # an account we already know is rate-limited this cycle.
             if skip_ids and stable_id in skip_ids:
                 if fallback and stable_id in fallback:
-                    _LOGGER.debug("Skipping %s > rate-limit back-off active", uid[:8])
+                    _LOGGER.debug("Skipping account %s > rate-limit back-off active", _short_token(uid))
                     out[stable_id] = fallback[stable_id]
                 continue
 
@@ -434,11 +405,11 @@ class EnableBankingClient:
                 except EnableBankingRateLimitError:
                     _LOGGER.debug(
                         "Account details rate-limited for %s; will retry next poll",
-                        uid[:8],
+                        _short_token(uid),
                     )
                     details = None
                 except EnableBankingAPIError as err:
-                    _LOGGER.debug("Could not fetch account details for %s: %s", uid[:8], err)
+                    _LOGGER.debug("Could not fetch account details for %s (%s)", _short_token(uid), type(err).__name__)
                     details = None
                 if details:
                     iban = _account_iban(details) or iban
@@ -465,8 +436,8 @@ class EnableBankingClient:
                     _LOGGER.warning(
                         "Rate limited on %s > keeping previous balance "
                         "(PSD2 caps AIS polling at 4/day). Error: %s",
-                        name,
-                        err,
+                        _short_token(uid),
+                        type(err).__name__,
                     )
                     # Adopt the previous value under the resolved stable_id
                     # (prev may be a legacy uid-keyed entry from before 0.6.5).
@@ -476,18 +447,17 @@ class EnableBankingClient:
                 else:
                     _LOGGER.warning(
                         "Rate limited on %s and no previous balance to fall back on. Error: %s",
-                        name,
-                        err,
+                        _short_token(uid),
+                        type(err).__name__,
                     )
                 continue
             except EnableBankingAPIError as err:
-                _LOGGER.warning("Skipping account %s (%s): %s", name, uid, err)
+                _LOGGER.warning("Skipping account %s (%s)", _short_token(uid), type(err).__name__)
                 continue
 
             _LOGGER.debug(
-                "account %s (%s) > %d balance object(s), types=%s",
-                uid[:8],
-                iban or name,
+                "account %s > %d balance object(s), types=%s",
+                _short_token(uid),
                 len(balances),
                 [b.get("balance_type") for b in balances if isinstance(b, dict)],
             )
@@ -495,10 +465,9 @@ class EnableBankingClient:
             picked = _pick_preferred_balance(balances)
             if picked is None:
                 _LOGGER.warning(
-                    "No usable balance for %s (%s); raw balances=%r",
-                    name,
-                    uid,
-                    balances,
+                    "No usable balance for account %s (balance objects=%d)",
+                    _short_token(uid),
+                    len(balances),
                 )
                 continue
 
@@ -513,7 +482,7 @@ class EnableBankingClient:
                 except (TypeError, ValueError):
                     amount = None
             if amount is None:
-                _LOGGER.warning("Could not parse amount for %s; picked=%r", uid, picked)
+                _LOGGER.warning("Could not parse amount for account %s", _short_token(uid))
                 continue
 
             out[stable_id] = AccountBalance(
