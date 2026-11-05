@@ -342,6 +342,28 @@ class EnableBankingClient:
             session.get("status"),
         )
 
+        # Temporary diagnostics for banks that authorize a session but expose
+        # no accounts. Log only container shapes and field names, never values.
+        accounts = session.get("accounts")
+        accounts_data = session.get("accounts_data")
+        _LOGGER.warning(
+            "Enable Banking account debug: "
+            "accounts_type=%s, accounts_count=%s, "
+            "accounts_data_type=%s, accounts_data_count=%s, "
+            "accounts_data_item_keys=%s",
+            type(accounts).__name__,
+            len(accounts) if isinstance(accounts, (list, dict)) else None,
+            type(accounts_data).__name__,
+            len(accounts_data) if isinstance(accounts_data, (list, dict)) else None,
+            (
+                sorted(accounts_data[0].keys())
+                if isinstance(accounts_data, list)
+                and accounts_data
+                and isinstance(accounts_data[0], dict)
+                else []
+            ),
+        )
+
         uids, metadata = _collect_accounts(session)
         _LOGGER.debug(
             "Resolved %d account uid(s); metadata entries: %d",
